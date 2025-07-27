@@ -204,7 +204,7 @@ router.get(
 //  */
 
 router.delete(
-  "/delete/:id",
+  "/:id",
   isAuthenticated,
   catchAsyncErrors(async (req, res, next) => {
     const user = await User.findByIdAndDelete(req.params.id);
