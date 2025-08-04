@@ -45,11 +45,13 @@ const user = require("./controller/userController");
 const saldo = require("./controller/saldoController");
 const transaction = require("./controller/transactionController");
 const categoryRoutes = require("./controller/categoryController");
+const dashboardRoutes = require("./controller/dashboardController");
 
 
 // define routes
 app.use("/category", categoryRoutes);
 app.use("/users", user);
+app.use("/dashboard", dashboardRoutes);
 app.use("/saldo", saldo);
 app.use("/transaction", transaction);
 
