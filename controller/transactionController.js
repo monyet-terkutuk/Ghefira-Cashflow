@@ -623,5 +623,50 @@ router.put(
     })
 );
 
+/**
+ * @route   DELETE /transaction/:id
+ * @desc    Delete transaction by ID and revert saldo accordingly
+ */
+router.delete(
+    "/:id",
+    isAuthenticated,
+    catchAsyncErrors(async (req, res, next) => {
+        const transaction = await Transaction.findById(req.params.id);
+        if (!transaction) {
+            return res.status(404).json({
+                code: 404,
+                message: "Transaction not found",
+            });
+        }
+
+        const saldo = await Saldo.findById(transaction.saldo);
+        if (!saldo) {
+            return res.status(404).json({
+                code: 404,
+                message: "Saldo not found",
+            });
+        }
+
+        // Revert saldo sesuai tipe transaksi
+        if (transaction.type === "income") {
+            saldo.amount -= transaction.amount;
+        } else if (transaction.type === "expense") {
+            saldo.amount += transaction.amount;
+        }
+        await saldo.save();
+
+        // Hapus transaksi
+        await transaction.deleteOne();
+
+        res.status(200).json({
+            meta: {
+                message: "Transaction deleted successfully",
+                code: 200,
+                status: "success",
+            },
+        });
+    })
+);
+
 
 module.exports = router;
