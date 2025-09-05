@@ -30,6 +30,235 @@ let lastTrainingDate = null;
 // ========================
 
 /**
+ * Generate confusion matrix from test data
+ */
+async function generateConfusionMatrix(testData) {
+    const matrix = {};
+    const categories = new Set();
+
+    // Initialize matrix
+    testData.forEach(item => {
+        categories.add(item.actualCategory);
+        categories.add(item.predictedCategory);
+    });
+
+    Array.from(categories).forEach(cat => {
+        matrix[cat] = {};
+        Array.from(categories).forEach(otherCat => {
+            matrix[cat][otherCat] = 0;
+        });
+    });
+
+    // Populate matrix
+    testData.forEach(item => {
+        matrix[item.actualCategory][item.predictedCategory]++;
+    });
+
+    return matrix;
+}
+
+/**
+ * Calculate evaluation metrics from confusion matrix
+ */
+function calculateMetrics(matrix) {
+    const metrics = {};
+    const categories = Object.keys(matrix);
+
+    categories.forEach(category => {
+        const truePositives = matrix[category][category];
+        let falsePositives = 0;
+        let falseNegatives = 0;
+
+        categories.forEach(otherCategory => {
+            if (otherCategory !== category) {
+                falsePositives += matrix[otherCategory][category] || 0;
+                falseNegatives += matrix[category][otherCategory] || 0;
+            }
+        });
+
+        const precision = truePositives / (truePositives + falsePositives) || 0;
+        const recall = truePositives / (truePositives + falseNegatives) || 0;
+        const f1Score = 2 * (precision * recall) / (precision + recall) || 0;
+
+        metrics[category] = {
+            precision: parseFloat(precision.toFixed(4)),
+            recall: parseFloat(recall.toFixed(4)),
+            f1Score: parseFloat(f1Score.toFixed(4)),
+            support: truePositives + falseNegatives
+        };
+    });
+
+    return metrics;
+}
+
+/**
+ * @route   POST /api/transactions/evaluate-model
+ * @desc    Evaluate model performance with confusion matrix
+ */
+router.post(
+    "/evaluate-model",
+    isAuthenticated,
+    catchAsyncErrors(async (req, res) => {
+        try {
+            // Split data into training and testing (80/20)
+            const allTransactions = await Transaction.find()
+                .populate("category")
+                .limit(1000); // Limit for performance
+
+            if (allTransactions.length < 10) {
+                return res.status(400).json({
+                    code: 400,
+                    status: "error",
+                    message: "Not enough data for evaluation (min 10 transactions)"
+                });
+            }
+
+            const splitIndex = Math.floor(allTransactions.length * 0.8);
+            const trainingData = allTransactions.slice(0, splitIndex);
+            const testData = allTransactions.slice(splitIndex);
+
+            // Train temporary classifier
+            const tempClassifier = bayes();
+
+            trainingData.forEach(tx => {
+                const inputText = `${tx.description} ${tx.type}`.toLowerCase();
+                const categoryName = tx.category?.name || "unknown";
+                tempClassifier.learn(inputText, categoryName);
+            });
+
+            // Test predictions
+            const predictions = [];
+
+            testData.forEach(tx => {
+                const inputText = `${tx.description} ${tx.type}`.toLowerCase();
+                const actualCategory = tx.category?.name || "unknown";
+                const predictedCategory = tempClassifier.categorize(inputText);
+
+                predictions.push({
+                    description: tx.description,
+                    type: tx.type,
+                    actualCategory,
+                    predictedCategory,
+                    isCorrect: actualCategory === predictedCategory
+                });
+            });
+
+            // Calculate metrics
+            const accuracy = predictions.filter(p => p.isCorrect).length / predictions.length;
+            const confusionMatrix = await generateConfusionMatrix(predictions);
+            const metrics = calculateMetrics(confusionMatrix);
+
+            return res.status(200).json({
+                code: 200,
+                status: "success",
+                data: {
+                    accuracy: parseFloat(accuracy.toFixed(4)),
+                    totalTestSamples: predictions.length,
+                    confusionMatrix,
+                    metrics,
+                    predictions: predictions.slice(0, 20) // Sample predictions
+                }
+            });
+
+        } catch (err) {
+            return res.status(500).json({
+                code: 500,
+                status: "error",
+                message: "Model evaluation failed",
+                error: err.message
+            });
+        }
+    })
+);
+
+/**
+ * @route   POST /api/transactions/cross-validate
+ * @desc    Perform k-fold cross validation
+ */
+router.post(
+    "/cross-validate",
+    isAuthenticated,
+    catchAsyncErrors(async (req, res) => {
+        try {
+            const k = req.body.k || 5; // Number of folds
+            const transactions = await Transaction.find()
+                .populate("category")
+                .limit(500);
+
+            if (transactions.length < k * 2) {
+                return res.status(400).json({
+                    code: 400,
+                    status: "error",
+                    message: `Not enough data for ${k}-fold cross validation`
+                });
+            }
+
+            const foldSize = Math.floor(transactions.length / k);
+            const results = [];
+
+            for (let i = 0; i < k; i++) {
+                const testStart = i * foldSize;
+                const testEnd = (i + 1) * foldSize;
+                const testData = transactions.slice(testStart, testEnd);
+                const trainingData = [
+                    ...transactions.slice(0, testStart),
+                    ...transactions.slice(testEnd)
+                ];
+
+                const tempClassifier = bayes();
+
+                // Train
+                trainingData.forEach(tx => {
+                    const inputText = `${tx.description} ${tx.type}`.toLowerCase();
+                    const categoryName = tx.category?.name || "unknown";
+                    tempClassifier.learn(inputText, categoryName);
+                });
+
+                // Test
+                let correct = 0;
+                testData.forEach(tx => {
+                    const inputText = `${tx.description} ${tx.type}`.toLowerCase();
+                    const actualCategory = tx.category?.name || "unknown";
+                    const predictedCategory = tempClassifier.categorize(inputText);
+
+                    if (actualCategory === predictedCategory) {
+                        correct++;
+                    }
+                });
+
+                const accuracy = correct / testData.length;
+                results.push({
+                    fold: i + 1,
+                    accuracy: parseFloat(accuracy.toFixed(4)),
+                    testSamples: testData.length
+                });
+            }
+
+            const avgAccuracy = results.reduce((sum, result) => sum + result.accuracy, 0) / results.length;
+
+            return res.status(200).json({
+                code: 200,
+                status: "success",
+                data: {
+                    k,
+                    averageAccuracy: parseFloat(avgAccuracy.toFixed(4)),
+                    folds: results,
+                    totalSamples: transactions.length
+                }
+            });
+
+        } catch (err) {
+            return res.status(500).json({
+                code: 500,
+                status: "error",
+                message: "Cross validation failed",
+                error: err.message
+            });
+        }
+    })
+);
+
+/**
  * Save the trained model to a JSON file with backup
  */
 function saveModel() {
